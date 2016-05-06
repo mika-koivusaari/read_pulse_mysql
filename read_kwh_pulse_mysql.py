@@ -3,6 +3,29 @@ import time
 import serial
 import MySQLdb
 import re
+from ConfigParser import SafeConfigParser
+from ConfigParser import NoSectionError
+
+def readConfig():
+  config = SafeConfigParser()
+  config.read('read_kwh_pulse_mysql.ini')
+  confData={}
+  try:
+    mysqlData={}
+    mysqlData['host'] = config.get('mysql','host')
+    mysqlData['user'] = config.get('mysql','user')
+    mysqlData['passwd'] = config.get('mysql','passwd')
+    mysqlData['database'] = config.get('mysql','database')
+    confData['mysql'] = mysqlData
+
+    serialData={}
+    serialData['device'] = config.get('serial','device')
+    confData['serial'] = serialData
+
+  except NoSectionError:
+    print 'Error in read_kwh_pulse_mysql.ini'
+    exit()
+  return confData
 
 #pulse counter
 counter1=0
@@ -17,15 +40,19 @@ sensorId2=115 #total
 
 inputPattern=re.compile('Counters: (\\d*),(\\d*)')
 
+config = readConfig()
+
 # connect
-db = MySQLdb.connect(host="localhost", user="*user*", passwd="*user*",db="weather")
+mysqlConf=config['mysql']
+db = MySQLdb.connect(host=mysqlConf['host'], user=mysqlConf['user'], passwd=mysqlConf['passwd'],db=mysqlConf['database'])
 # create a cursor
 cursor = db.cursor()
 print 'Connected to MySql'
 
 # configure the serial connections (the parameters differs on the device you are connecting to)
+serialConfig=config['serial']
 ser = serial.Serial(
-	port='/dev/ttyUSB0',
+	port=serialConfig['device'],
 	baudrate=9600,
 	parity=serial.PARITY_NONE,
 	stopbits=serial.STOPBITS_ONE,

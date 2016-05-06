@@ -1,0 +1,9 @@
+[mysql]
+host = localhost
+user = [user]
+passwd = [passwd]
+database = [database]
+
+[serial]
+device = /ttyUSB0
+
