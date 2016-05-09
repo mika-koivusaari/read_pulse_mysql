@@ -3,12 +3,16 @@ import time
 import serial
 import MySQLdb
 import re
+import getopt
+import sys
 from ConfigParser import SafeConfigParser
 from ConfigParser import NoSectionError
 
-def readConfig():
+def readConfig(conf_file=None):
   config = SafeConfigParser()
-  config.read('read_kwh_pulse_mysql.ini')
+  if (conf_file==None):
+    conf_file='read_kwh_pulse_mysql.ini'
+  config.read(conf_file)
   confData={}
   try:
     mysqlData={}
@@ -40,7 +44,15 @@ sensorId2=115 #total
 
 inputPattern=re.compile('Counters: (\\d*),(\\d*)')
 
-config = readConfig()
+conf_file=None
+opts, args = getopt.getopt(sys.argv[1:],"f:")
+for opt, arg in opts:
+   if opt == '-h':
+       print 'test.py -i <inputfile> -o <outputfile>'
+       sys.exit()
+   elif opt in ("-f"):
+       conf_file = arg
+config = readConfig(conf_file)
 
 # connect
 mysqlConf=config['mysql']
