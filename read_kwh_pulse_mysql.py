@@ -48,18 +48,23 @@ conf_file=None
 opts, args = getopt.getopt(sys.argv[1:],"f:")
 for opt, arg in opts:
    if opt == '-h':
-       print 'test.py -i <inputfile> -o <outputfile>'
+       print 'read_kwh_pulse.py -f <configfile>'
        sys.exit()
    elif opt in ("-f"):
        conf_file = arg
 config = readConfig(conf_file)
 
-# connect
 mysqlConf=config['mysql']
-db = MySQLdb.connect(host=mysqlConf['host'], user=mysqlConf['user'], passwd=mysqlConf['passwd'],db=mysqlConf['database'])
-# create a cursor
-cursor = db.cursor()
-print 'Connected to MySql'
+if mysqlConf['host']!='None':
+  # connect
+  #mysqlConf=config['mysql']
+  db = MySQLdb.connect(host=mysqlConf['host'], user=mysqlConf['user'], passwd=mysqlConf['passwd'],db=mysqlConf['database'])
+  # create a cursor
+  cursor = db.cursor()
+  print 'Connected to MySql'
+else:
+  db=None
+  print 'MySql host None, not connected.'
 
 # configure the serial connections (the parameters differs on the device you are connecting to)
 serialConfig=config['serial']
@@ -111,9 +116,10 @@ try:
 
 #    log.write(time.strftime('%H:%M')+' '+str(counter)+'\n')
 
-    cursor.execute('INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',(sensorId1,counter1))
-    cursor.execute('INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',(sensorId2,counter2))
-    cursor.execute('COMMIT')
+    if db is not None:
+      cursor.execute('INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',(sensorId1,counter1))
+      cursor.execute('INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',(sensorId2,counter2))
+      cursor.execute('COMMIT')
     counter1=0
     counter2=0
 #    log.flush()
@@ -127,5 +133,6 @@ except KeyboardInterrupt:
 #GPIO.cleanup()           # clean up GPIO on normal exit
 if log is not None:
   log.close()
-cursor.close()
-db.close()
+if db is not None:
+  cursor.close()
+  db.close()
