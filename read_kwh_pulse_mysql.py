@@ -4,6 +4,8 @@ import time
 import serial
 import MySQLdb
 import re
+import getopt
+import sys
 from ConfigParser import SafeConfigParser
 from ConfigParser import NoSectionError
 
@@ -14,9 +16,11 @@ class App:
     db = None
     ser = None
 
-    def readConfig():
+    def readConfig(conf_file=None):
         config = SafeConfigParser()
-        config.read('read_kwh_pulse_mysql.ini')
+        if (conf_file == None):
+            conf_file = 'read_kwh_pulse_mysql.ini'
+        config.read(conf_file)
         confData = {}
         try:
             mysqlData = {}
@@ -42,15 +46,27 @@ class App:
         self.pidfile_path = '/var/run/readkwhpulse/readkwhpulse.pid'
         self.pidfile_timeout = 5
 
-        self.config = readConfig()
+        conf_file=None
+        opts, args = getopt.getopt(sys.argv[1:],"f:")
+        for opt, arg in opts:
+          if opt == '-h':
+            print 'read_kwh_pulse.py -f <configfile>'
+            sys.exit()
+          elif opt in ("-f"):
+            conf_file = arg
+        config = readConfig(conf_file)
 
         # connect
         mysqlConf = config['mysql']
-        self.db = MySQLdb.connect(host=mysqlConf['host'], user=mysqlConf['user'], passwd=mysqlConf['passwd'],
-                             db=mysqlConf['database'])
-        logger.info("Connected to MySql")
-        # create a cursor
-        cursor = self.db.cursor()
+        if mysqlConf['host']!='None':
+          self.db = MySQLdb.connect(host=mysqlConf['host'], user=mysqlConf['user'], passwd=mysqlConf['passwd'],
+                               db=mysqlConf['database'])
+          c"Connected to MySql")
+          # create a cursor
+          cursor = self.db.cursor()
+        else:
+          db = None
+          logger.info('MySql host None, not connected.')
 
         # configure the serial connections (the parameters differs on the device you are connecting to)
         serialConfig = config['serial']
@@ -99,13 +115,14 @@ class App:
 
             logger.debug(time.strftime('%H:%M') + ' ' + str(counter1) + ' ' + str(sensorId1) + ' ' + str(counter2) + ' ' + str(sensorId2))
 
-            cursor.execute(
-                'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
-                (sensorId1, counter1))
-            cursor.execute(
-                'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
-                (sensorId2, counter2))
-            cursor.execute('COMMIT')
+            if db is not None:
+              cursor.execute(
+                  'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
+                  (sensorId1, counter1))
+              cursor.execute(
+                  'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
+                  (sensorId2, counter2))
+              cursor.execute('COMMIT')
             counter1 = 0
             counter2 = 0
             #Main code goes here ...
@@ -134,11 +151,12 @@ daemon_runner.do_action()
 
 
 except KeyboardInterrupt:
-    #  GPIO.cleanup()       # clean up GPIO on CTRL+C exit
-    if log is not None:
-        log.close()
-# GPIO.cleanup()           # clean up GPIO on normal exit
-if log is not None:
+#  GPIO.cleanup()       # clean up GPIO on CTRL+C exit
+  if log is not None:
     log.close()
-cursor.close()
-db.close()
+#GPIO.cleanup()           # clean up GPIO on normal exit
+if log is not None:
+  log.close()
+if db is not None:
+  cursor.close()
+  db.close()
