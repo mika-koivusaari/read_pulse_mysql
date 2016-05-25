@@ -1,34 +1,28 @@
 #!/usr/bin/python
 import logging
 import time
-import serial
 import MySQLdb
 import re
 import argparse
 import sys
+import os
 import signal
-from ConfigParser import SafeConfigParser
-from ConfigParser import NoSectionError
+#configparser was renamed in python 3
+if(sys.version_info[0] == 2):
+    from ConfigParser import SafeConfigParser
+    from ConfigParser import NoSectionError
+else:
+    from configparser import SafeConfigParser
+    from configparser import NoSectionError
 
+import serial
 from pep3143daemon import DaemonContext, PidFile
 
 def main():
-    print sys.argv[1:]
+    print (sys.argv[1:])
     parser = argparse.ArgumentParser(description="Pulse reader")
 
     parser.add_argument('method', choices=['start', 'stop', 'reload'])
-
-#    subparsers = parser.add_subparsers(help='commands', dest='method')
-#    subparsers.required = True
-
-#    stop_parser = subparsers.add_parser('stop', help='Stop PulseReader')
-#    stop_parser.set_defaults(method='stop')
-
-#    start_parser = subparsers.add_parser('start', help='Start PulseReader')
-#    start_parser.set_defaults(method='start')
-
-#    reload_parser = subparsers.add_parser('reload', help='Reload configuration')
-#    reload_parser.set_defaults(method='reload_config')
 
     parser.add_argument("--cfg", dest="cfg", action="store",
                         default="/etc/pulsereader/pulsereader.ini",
@@ -36,7 +30,7 @@ def main():
 
 
     parser.add_argument("--pid", dest="pid", action="store",
-                        default="/var/run/pulsereader/el_aap.pid",
+                        default="/var/run/pulsereader/pulsereader.pid",
                         help="Full path to PID file")
 
     parser.add_argument("--nodaemon", dest="nodaemon", action="store_true",
@@ -76,9 +70,17 @@ class App:
     logger=None
     config=None
     cursor=None
+    daemon=None
 
-    def reloadConfig(self):
-        logger.debug("reload")
+    def reload_program_config(self,signum, frame):
+        conf=self.readConfig(self._config_file)
+        if conf!=None:
+            self.config=conf
+            self.close_resources()
+            self.openConnections()
+
+    def terminate(self,signum, frame):
+        self.logger.info("terminate")
 
     def readConfig(self,conf_file=None):
         config = SafeConfigParser()
@@ -92,26 +94,37 @@ class App:
             mysqlData['user'] = config.get('mysql', 'user')
             mysqlData['passwd'] = config.get('mysql', 'passwd')
             mysqlData['database'] = config.get('mysql', 'database')
-            confData['mysql'] = mysqlData
 
             serialData = {}
             serialData['device'] = config.get('serial', 'device')
-            confData['serial'] = serialData
 
         except NoSectionError:
-            print 'Error in '+conf_file
-            exit()
+            if self.daemon!=None and self.daemon.is_open:
+                self.logger.error("Error in "+str(conf_file))
+                return None
+            else:
+                print ('Error in '+conf_file)
+                exit()
+
+        confData['mysql'] = mysqlData
+        confData['serial'] = serialData
+        if self.daemon!=None and self.daemon.is_open:
+            self.logger.info("Config loaded from " + str(conf_file))
+        else:
+            print("Config loaded from " + str(conf_file))
         return confData
 
     def __init__(self, cfg, pid, nodaemon):
         self._config_file = cfg
         self._pid = pid
         self._nodaemon = nodaemon
-        self.logger = logging.getLogger('PulseReader')
-        #TODO move to config
-        self.logger.setLevel(logging.DEBUG)
 
-    def program_cleanup(self):
+    def program_cleanup(self,signum, frame):
+        self.logger.info('Program cleanup')
+        self.close_resources()
+        raise SystemExit('Terminating on signal {0}'.format(signum))
+
+    def close_resources(self):
         if self.db is not None:
             self.cursor.close(
 
@@ -120,8 +133,15 @@ class App:
         if self.ser is not None:
             self.ser.close()
 
-    def __del__(self):
-        self.program_cleanup()
+    def createLogger(self):
+        self.logger = logging.getLogger('PulseReader')
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        handler = logging.FileHandler("/var/log/pulsereader/pulsereader.log")
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+        #TODO move to config
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.debug('Logger created.')
 
     def openConnections(self):
         self.logger.debug("openConnections "+str(self.config))
@@ -138,15 +158,16 @@ class App:
             self.logger.info('MySql host None, not connected.')
 
         try:
-            self.logger.debug("Open serial")
-            # configure the serial connections (the parameters differs on the device you are connecting to)
             serialConfig = self.config['serial']
+            self.logger.debug("Open serial "+serialConfig['device'])
+            # configure the serial connections (the parameters differs on the device you are connecting to)
             self.ser = serial.Serial(
-                port=serialConfig['device'],
-                baudrate=9600,
-                parity=serial.PARITY_NONE,
-                stopbits=serial.STOPBITS_ONE,
-                bytesize=serial.EIGHTBITS
+                port=serialConfig['device']
+#                ,
+#                baudrate=9600,
+#                parity=serial.PARITY_NONE,
+#                stopbits=serial.STOPBITS_ONE,
+#                bytesize=serial.EIGHTBITS
             )
             self.ser.isOpen()
             # Wait for a second if device sends some boot message, and then empty buffer
@@ -161,8 +182,8 @@ class App:
             raise
 
     def run(self):
-        self.logger.debug("Run")
         self.openConnections()
+        self.logger.debug("Run")
         # pulse counter
         counter1 = 0
         counter2 = 0
@@ -222,6 +243,10 @@ class App:
     def config(self):
         return self._config
 
+    @config.setter
+    def config(self, value):
+        'setting'
+        self._config = value
 
     @property
     def pid(self):
@@ -233,7 +258,7 @@ class App:
         return self._nodaemon
 
 
-    def quit(self):
+    def stop(self):
         try:
             pid = open(self.pid).readline()
         except IOError:
@@ -248,22 +273,44 @@ class App:
             time.sleep(0.5)
         print("Gone")
 
+    def reload(self):
+        try:
+            pid = open(self.pid).readline()
+        except IOError:
+            print("Daemon not running, or pidfile was deleted manually")
+            sys.exit(1)
+        print("Sending SIGUSR1 to Daemon with Pid: {0}".format(pid))
+        os.kill(int(pid), signal.SIGUSR1)
+        sys.stdout.write("Ok")
 
     def start(self):
-        print "start"
-        self.readConfig(self._config_file)
-        print "config read"
-        daemon = DaemonContext(pidfile=PidFile(self.pid))
-        print "daemon context"
+        print ("start")
+        self.config=self.readConfig(self._config_file)
+        print ("config read")
+        self.daemon = DaemonContext(pidfile=PidFile(self.pid)
+                               ,signal_map={
+            signal.SIGTERM: self.program_cleanup,
+            signal.SIGHUP: self.terminate,
+            signal.SIGUSR1: self.reload_program_config
+        })
+#        daemon.signal_map={
+#            signal.SIGTERM: self.program_cleanup,
+#            signal.SIGHUP: self.terminate,
+#            signal.SIGUSR1: self.reload_program_config
+#        }
+        print ("daemon context")
         if self.nodaemon:
-            daemon.detach_process = False
-#        dlog = open(self.config.get('main', 'dlog'), 'w')
-#        daemon.stderr = dlog
-#        daemon.stdout = dlog
-        print "next open"
-        daemon.open()
-        print "after open"
-        self.run()
+            self.daemon.detach_process = False
+#            daemon.stderr = "/tmp/pulse_err.out"
+#            daemon.stdout = "/tmp/pulset.out"
+        try:
+            self.daemon.open()
+            self.createLogger()
+            self.logger.debug('After open')
+            self.run()
+        except:
+            print ("Unexpected error:", sys.exc_info()[0])
+            raise
 
 #conf_file = None
 #print sys.argv[1:]
