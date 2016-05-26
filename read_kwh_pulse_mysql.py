@@ -11,15 +11,16 @@ import signal
 if(sys.version_info[0] == 2):
     from ConfigParser import SafeConfigParser
     from ConfigParser import NoSectionError
+    from ConfigParser import NoOptionError
 else:
     from configparser import SafeConfigParser
     from configparser import NoSectionError
+    from configparser import NoOptionError
 
 import serial
 from pep3143daemon import DaemonContext, PidFile
 
 def main():
-    print (sys.argv[1:])
     parser = argparse.ArgumentParser(description="Pulse reader")
 
     parser.add_argument('method', choices=['start', 'stop', 'reload'])
@@ -67,24 +68,25 @@ class App:
     config = None
     db = None
     ser = None
-    logger=None
-    config=None
-    cursor=None
-    daemon=None
+    logger = None
+    loggerfh = None
+    cursor = None
+    daemon = None
 
     def reload_program_config(self,signum, frame):
         conf=self.readConfig(self._config_file)
-        if conf!=None:
+        if conf is not None:
             self.config=conf
             self.close_resources()
             self.openConnections()
+            self.createLogger()
 
     def terminate(self,signum, frame):
         self.logger.info("terminate")
 
     def readConfig(self,conf_file=None):
         config = SafeConfigParser()
-        if (conf_file == None):
+        if (conf_file is None):
             conf_file = 'read_kwh_pulse_mysql.ini'
         config.read(conf_file)
         confData = {}
@@ -98,8 +100,27 @@ class App:
             serialData = {}
             serialData['device'] = config.get('serial', 'device')
 
+            loggerData = {}
+            try:
+                try:
+                    loggerData['formatter'] = config.get('logger', 'formatter')
+                except  NoOptionError:
+                    loggerData['formatter'] = None
+                try:
+                    loggerData['file'] = config.get('logger', 'file')
+                except  NoOptionError:
+                    loggerData['file'] = None
+                try:
+                    loggerData['level'] = config.get('logger', 'level')
+                except  NoOptionError:
+                    loggerData['level'] = None
+            except NoSectionError:
+                loggerData['formatter'] = None
+                loggerData['file'] = None
+                loggerData['level'] = None
+
         except NoSectionError:
-            if self.daemon!=None and self.daemon.is_open:
+            if self.daemon is not None and self.daemon.is_open:
                 self.logger.error("Error in "+str(conf_file))
                 return None
             else:
@@ -108,7 +129,8 @@ class App:
 
         confData['mysql'] = mysqlData
         confData['serial'] = serialData
-        if self.daemon!=None and self.daemon.is_open:
+        confData['logger'] = loggerData
+        if self.daemon is not None and self.daemon.is_open:
             self.logger.info("Config loaded from " + str(conf_file))
         else:
             print("Config loaded from " + str(conf_file))
@@ -134,20 +156,34 @@ class App:
             self.ser.close()
 
     def createLogger(self):
-        self.logger = logging.getLogger('PulseReader')
-        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-        handler = logging.FileHandler("/var/log/pulsereader/pulsereader.log")
-        handler.setFormatter(formatter)
-        self.logger.addHandler(handler)
-        #TODO move to config
-        self.logger.setLevel(logging.DEBUG)
+        loggerConf = self.config['logger']
+        if self.logger is None:
+            self.logger = logging.getLogger('PulseReader')
+
+        formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s" if loggerConf["formatter"]==None else loggerConf["formatter"])
+        if self.loggerfh is not None:
+            self.loggerfh.close()
+            self.logger.removeHandler(self.loggerfh)
+        self.loggerfh = logging.FileHandler("/var/log/pulsereader/pulsereader.log" if loggerConf["file"]==None else loggerConf["file"])
+        self.loggerfh.setFormatter(formatter)
+        self.logger.addHandler(self.loggerfh)
+        level = {
+            "CRITICAL": logging.CRITICAL,
+            "ERROR": logging.ERROR,
+            "WARNING": logging.WARNING,
+            "INFO": logging.INFO,
+            "DEBUG": logging.DEBUG,
+            "NOTSET": logging.NOTSET
+        }
+        self.logger.setLevel(level.get(loggerConf["level"],logging.INFO))
         self.logger.debug('Logger created.')
 
     def openConnections(self):
-        self.logger.debug("openConnections "+str(self.config))
+        self.logger.debug("openConnections")
         # connect
         mysqlConf = self.config['mysql']
-        if mysqlConf['host'] != 'None':
+        self.logger.debug("MySql "+str(mysqlConf))
+        if mysqlConf['host']!='None':
             self.db = MySQLdb.connect(host=mysqlConf['host'], user=mysqlConf['user'], passwd=mysqlConf['passwd'],
                                       db=mysqlConf['database'])
             self.logger.info("Connected to MySql")
@@ -159,15 +195,14 @@ class App:
 
         try:
             serialConfig = self.config['serial']
-            self.logger.debug("Open serial "+serialConfig['device'])
+            self.logger.debug("Serial " + str(serialConfig))
             # configure the serial connections (the parameters differs on the device you are connecting to)
             self.ser = serial.Serial(
-                port=serialConfig['device']
-#                ,
-#                baudrate=9600,
-#                parity=serial.PARITY_NONE,
-#                stopbits=serial.STOPBITS_ONE,
-#                bytesize=serial.EIGHTBITS
+                port=serialConfig['device'],
+                baudrate=9600,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                bytesize=serial.EIGHTBITS
             )
             self.ser.isOpen()
             # Wait for a second if device sends some boot message, and then empty buffer
@@ -231,13 +266,6 @@ class App:
                 self.logger.debug("No database, not inserted.")
             counter1 = 0
             counter2 = 0
-            #Main code goes here ...
-            #Note that logger level needs to be set to logging.DEBUG before this shows up in the logs
-#            logger.debug("Debug message")
-#            logger.info("Info message")
-#            logger.warn("Warning message")
-#            logger.error("Error message")
-#            time.sleep(10)
 
     @property
     def config(self):
@@ -284,21 +312,13 @@ class App:
         sys.stdout.write("Ok")
 
     def start(self):
-        print ("start")
         self.config=self.readConfig(self._config_file)
-        print ("config read")
         self.daemon = DaemonContext(pidfile=PidFile(self.pid)
                                ,signal_map={
             signal.SIGTERM: self.program_cleanup,
             signal.SIGHUP: self.terminate,
             signal.SIGUSR1: self.reload_program_config
         })
-#        daemon.signal_map={
-#            signal.SIGTERM: self.program_cleanup,
-#            signal.SIGHUP: self.terminate,
-#            signal.SIGUSR1: self.reload_program_config
-#        }
-        print ("daemon context")
         if self.nodaemon:
             self.daemon.detach_process = False
 #            daemon.stderr = "/tmp/pulse_err.out"
@@ -312,53 +332,6 @@ class App:
             print ("Unexpected error:", sys.exc_info()[0])
             raise
 
-#conf_file = None
-#print sys.argv[1:]
-#opts, args = getopt.getopt(sys.argv[2:], "hf:")
-#print opts
-#print args
-#for opt, arg in opts:
-#    print opt,arg
-#    if opt == '-h':
-#        print 'read_kwh_pulse.py -f <configfile>'
-#        sys.exit()
-#    elif opt in ("-f"):
-#        conf_file = arg
-
-#logger = logging.getLogger("PulseReader")
-#logger.setLevel(logging.DEBUG)
-#formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-#handler = logging.FileHandler("/var/log/pulsereader/pulsereader.log")
-#handler.setFormatter(formatter)
-#logger.addHandler(handler)
-
-#app = App(conf_file,logger)
-
-#app.run()
-
-#daemon_runner = runner.DaemonRunner(app)
-#context = daemon.DaemonContext(
-#    working_directory='/tmp',
-#    umask=0o002,
-#    pidfile=lockfile.FileLock('/var/run/readkwhpulse/readkwhpulse.pid'),
-#    )
-
-#context.signal_map = {
-#daemon_runner.daemon_context.signal_map={
-#    signal.SIGTERM: app.program_cleanup,
-#    signal.SIGHUP: 'terminate',
-#    signal.SIGUSR1: app.reloadConfig,
-#    }
-
-#context.files_preserve = [handler.stream]
-
-#with context:
-#    app.run()
-
-#This ensures that the logger file handle does not get closed during daemonization
-#daemon_runner.daemon_context.files_preserve=[handler.stream]
-#daemon_runner.daemon_context.signal_map
-#daemon_runner.do_action()
 
 
 if __name__ == "__main__":
