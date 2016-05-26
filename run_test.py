@@ -1,5 +1,9 @@
 #!/usr/bin/python
 
+#Depends on socat.
+#Start socat to emulate serial interface and start python script to emulate hardware.
+#socat open two pipes in current directory, daemon, to which the daemon connects,
+#and hardware, to which the hw emulator connects
 import subprocess
 import shlex
 import time
