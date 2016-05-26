@@ -5,5 +5,7 @@ passwd = [passwd]
 database = [database]
 
 [serial]
-device = /ttyUSB0
+device = /dev/ttyUSB0
 
+[logger]
+level = DEBUG
