@@ -7,6 +7,7 @@ import argparse
 import sys
 import os
 import signal
+import grp
 #configparser was renamed in python 3
 if(sys.version_info[0] == 2):
     from ConfigParser import SafeConfigParser
@@ -90,6 +91,7 @@ class App:
             conf_file = 'read_kwh_pulse_mysql.ini'
         config.read(conf_file)
         confData = {}
+        #Mandatory configurations
         try:
             mysqlData = {}
             mysqlData['host'] = config.get('mysql', 'host')
@@ -100,24 +102,10 @@ class App:
             serialData = {}
             serialData['device'] = config.get('serial', 'device')
 
-            loggerData = {}
-            try:
-                try:
-                    loggerData['formatter'] = config.get('logger', 'formatter')
-                except  NoOptionError:
-                    loggerData['formatter'] = None
-                try:
-                    loggerData['file'] = config.get('logger', 'file')
-                except  NoOptionError:
-                    loggerData['file'] = None
-                try:
-                    loggerData['level'] = config.get('logger', 'level')
-                except  NoOptionError:
-                    loggerData['level'] = None
-            except NoSectionError:
-                loggerData['formatter'] = None
-                loggerData['file'] = None
-                loggerData['level'] = None
+            daemonData = {}
+            groupname = config.get('daemon', 'group')
+            daemonData['groupid'] = grp.getgrnam(groupname)[2]
+
 
         except NoSectionError:
             if self.daemon is not None and self.daemon.is_open:
@@ -127,9 +115,30 @@ class App:
                 print ('Error in '+conf_file)
                 exit()
 
+        #Optional configurations
+        loggerData = {}
+        try:
+            try:
+                loggerData['formatter'] = config.get('logger', 'formatter')
+            except  NoOptionError:
+                loggerData['formatter'] = None
+            try:
+                loggerData['file'] = config.get('logger', 'file')
+            except  NoOptionError:
+                loggerData['file'] = None
+            try:
+                loggerData['level'] = config.get('logger', 'level')
+            except  NoOptionError:
+                loggerData['level'] = None
+        except NoSectionError:
+            loggerData['formatter'] = None
+            loggerData['file'] = None
+            loggerData['level'] = None
+
         confData['mysql'] = mysqlData
         confData['serial'] = serialData
         confData['logger'] = loggerData
+        confData['daemon'] = daemonData
         if self.daemon is not None and self.daemon.is_open:
             self.logger.info("Config loaded from " + str(conf_file))
         else:
@@ -204,12 +213,16 @@ class App:
                 stopbits=serial.STOPBITS_ONE,
                 bytesize=serial.EIGHTBITS
             )
-            self.ser.isOpen()
-            # Wait for a second if device sends some boot message, and then empty buffer
-            time.sleep(1)
+            if not self.ser.isOpen():
+                self.logger.error("Serial did not open " + str(serialConfig))
+            # Arduinos bootloader prints a newline somewhere in boot, wait for it
+            # TODO put in conf
+            time.sleep(10)
+            out = ""
             while self.ser.inWaiting() > 0:
                 out += self.ser.read(1)
             self.logger.info('Serial is open. ' + serialConfig['device'])
+            self.logger.debug("Serial output:"+out)
         except:
             self.logger.error(sys.exc_info()[0])
             self.logger.error(sys.exc_info()[1])
@@ -228,44 +241,51 @@ class App:
         sensorId2 = 115  # total
 
         # input from arduino "Counters: n,n"
-        inputPattern = re.compile('Counters: (\\d*),(\\d*)')
-        self.logger.debug(self.ser.isOpen())
+        inputPattern = re.compile('Counters: (\\d*),(\\d*)',re.MULTILINE)
+        self.logger.debug("Is serial open "+str(self.ser.isOpen()))
 
         self.logger.debug("Start")
         while True:
-            time.sleep(59)
+            try:
+                time.sleep(59)
 
-            self.logger.debug("Request counter values")
-            #request counter values
-            self.ser.write('GET\n')
-            out = ''
-            # let's wait one second before reading output (let's give device time to answer)
-            time.sleep(1)
-            while self.ser.inWaiting() > 0:
-                out += self.ser.read(1)
-            if out != '':
-                m = inputPattern.match(out)
-                if m:
-                    counter1 = int(m.group(1))
-                    counter2 = int(m.group(2))
+                self.logger.debug("Request counter values")
+                #request counter values
+                self.ser.write('GET\n')
+                out = ''
+                # let's wait one second before reading output (let's give device time to answer)
+                time.sleep(1)
+                while self.ser.inWaiting() > 0:
+                    out += self.ser.read(1)
+                if out != '':
+                    m = inputPattern.match(out)
+                    self.logger.debug("Got '"+out+"'")
+                    if m:
+                        counter1 = int(m.group(1))
+                        counter2 = int(m.group(2))
+                    else:
+                        self.logger.warn("No count "+out)
+
+                self.logger.debug(time.strftime('%H:%M') + ' ' + str(counter1) + ' ' + str(sensorId1) + ' ' + str(counter2) + ' ' + str(sensorId2))
+
+                if self.db is not None:
+                    self.logger.debug("Insert values")
+                    self.cursor.execute(
+                        'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
+                        (sensorId1, counter1))
+                    self.cursor.execute(
+                        'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
+                        (sensorId2, counter2))
+                    self.cursor.execute('COMMIT')
                 else:
-                    logger.warn("No count")
-
-            self.logger.debug(time.strftime('%H:%M') + ' ' + str(counter1) + ' ' + str(sensorId1) + ' ' + str(counter2) + ' ' + str(sensorId2))
-
-            if self.db is not None:
-                self.logger.debug("Insert values")
-                self.cursor.execute(
-                    'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
-                    (sensorId1, counter1))
-                self.cursor.execute(
-                    'INSERT INTO data (sensorid,time,value) VALUES (%s,str_to_date(date_format(now(),"%%d.%%m.%%Y %%H:%%i"),"%%d.%%m.%%Y %%H:%%i"), %s)',
-                    (sensorId2, counter2))
-                self.cursor.execute('COMMIT')
-            else:
-                self.logger.debug("No database, not inserted.")
-            counter1 = 0
-            counter2 = 0
+                    self.logger.debug("No database, not inserted.")
+                counter1 = 0
+                counter2 = 0
+            except:
+                self.logger.error(sys.exc_info()[0])
+                self.logger.error(sys.exc_info()[1])
+                self.logger.error(sys.exc_info()[2])
+                raise
 
     @property
     def config(self):
@@ -317,8 +337,8 @@ class App:
                                ,signal_map={
             signal.SIGTERM: self.program_cleanup,
             signal.SIGHUP: self.terminate,
-            signal.SIGUSR1: self.reload_program_config
-        })
+            signal.SIGUSR1: self.reload_program_config},
+                                    gid=self.config["daemon"]["groupid"])
         if self.nodaemon:
             self.daemon.detach_process = False
 #            daemon.stderr = "/tmp/pulse_err.out"
